@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+anthropic
+faster-whisper
+numpy
+python-dotenv
+pypdf
+python-docx
