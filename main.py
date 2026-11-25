@@ -29,6 +29,7 @@ class Req(BaseModel):
     context: str = ""         # 미팅 배경 / 내 역할
     history: list[Turn] = []
     want_replies: bool = True
+    length: str = "medium"    # short | medium | long
 
 
 SYSTEM = """You are a real-time meeting interpreter and reply assistant.
@@ -66,7 +67,7 @@ async def process(req: Req):
         msg = await client.messages.create(
             model=MODEL,
             max_tokens=6000,
-            system=system_prompt(),
+            system=system_prompt(req.length),
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         )
         text = "".join(b.text for b in msg.content if b.type == "text")
@@ -96,11 +97,23 @@ def load_resume():
     return RESUME_TXT.read_text(encoding="utf-8") if RESUME_TXT.exists() else ""
 
 
-def system_prompt():
+LENGTHS = {
+    "short": "Keep every reply to ONE short sentence (under about 20 words). The gloss is equally short.",
+    "medium": "Keep every reply to 2-3 sentences.",
+    "long": "Make every reply detailed: 4-6 sentences (about 80-120 words) with a reason or a concrete example. The gloss mirrors it.",
+}
+
+
+def length_rule(length):
+    return "\nREPLY LENGTH RULE (overrides any sentence count stated above): " + LENGTHS.get(length, LENGTHS["medium"]) + "\n"
+
+
+def system_prompt(length="medium"):
+    s = SYSTEM + length_rule(length)
     r = load_resume()
-    if not r:
-        return SYSTEM
-    return SYSTEM + "\n" + RESUME_RULES + "\n--- RESUME ---\n" + r
+    if r:
+        s += "\n" + RESUME_RULES + "\n--- RESUME ---\n" + r
+    return s
 
 
 def extract_text(name, raw):
@@ -181,6 +194,65 @@ async def transcribe(request: Request, lang: str = "en"):
         return {"text": ""}
     text = await run_in_threadpool(_transcribe, audio, lang)
     return {"text": text}
+
+
+# ---- Claude와 대화 (답변을 같이 다듬기) ----
+class Msg(BaseModel):
+    role: str
+    content: str
+
+
+class ChatReq(BaseModel):
+    messages: list[Msg]
+    context: str = ""
+    meeting_lang: str = "English"
+    length: str = "medium"
+    history: list[Turn] = []
+    replies: list[dict] = []
+
+
+CHAT_SYSTEM = """You are the assistant built into my live meeting copilot. I talk to you in Korean while a meeting is going on, to refine what I will say.
+You can: rewrite or adjust the current reply options (shorter, longer, warmer, firmer, more formal, different stance), write new replies for a direction I describe, explain what the other person meant, suggest what to say or ask, and answer quick questions about the meeting.
+
+Return ONLY a JSON object, no markdown fences:
+{"message": "<short Korean answer, 1-3 sentences, no filler>", "replies": null}
+- If I ask to change, rewrite, or produce replies, set "replies" to a list of 1-5 objects {"label": "<2-4 word Korean label>", "text": "<reply in the meeting language, natural spoken style>", "gloss": "<Korean translation of that reply>"}. Otherwise set "replies" to null.
+- When I refer to a reply by number ("2번"), use the numbering of CURRENT REPLY OPTIONS. If I only ask to change one, return just the revised one unless I ask for all.
+- Follow length and tone requests in my message. Otherwise obey the default REPLY LENGTH RULE.
+- Never invent facts, dates, numbers, or commitments I have not given you; use placeholders like [date].
+- Be concise: the message is read in the middle of a meeting.
+"""
+
+
+def chat_prompt(req):
+    conv = "\n".join(("THEM: " if t.speaker == "them" else "ME: ") + t.text for t in req.history[-12:]) or "(nothing yet)"
+    cur = json.dumps(req.replies, ensure_ascii=False) if req.replies else "(none yet)"
+    s = (CHAT_SYSTEM + length_rule(req.length)
+         + f"\nMEETING LANGUAGE: {req.meeting_lang}\nMEETING CONTEXT: {req.context or '(not provided)'}"
+         + f"\n\nRECENT CONVERSATION (translated originals):\n{conv}\n\nCURRENT REPLY OPTIONS (numbered in order):\n{cur}\n")
+    r = load_resume()
+    if r:
+        s += "\n" + RESUME_RULES + "\n--- RESUME ---\n" + r
+    return s
+
+
+@app.post("/api/chat")
+async def chat(req: ChatReq):
+    msgs = [{"role": "assistant" if m.role == "assistant" else "user", "content": m.content}
+            for m in req.messages if m.content.strip()]
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    if not msgs:
+        raise HTTPException(400, "메시지가 비어 있어요.")
+    try:
+        msg = await client.messages.create(model=MODEL, max_tokens=6000, system=chat_prompt(req), messages=msgs)
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        try:
+            return parse_json(text)
+        except json.JSONDecodeError:
+            return {"message": text.strip(), "replies": None}   # JSON이 아니어도 대화는 보여준다
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 
 @app.get("/")

@@ -74,6 +74,16 @@ textarea{width:100%;resize:none;field-sizing:content;min-height:32px;max-height:
 #send{width:32px;height:32px;border-radius:10px;background:var(--ink);color:#111;font-size:12px}
 input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
 ::placeholder{color:var(--faint)}
+.lenrow{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--faint)}
+.seg{display:flex;background:var(--soft);border-radius:8px;padding:2px}
+.seg button{height:20px;padding:0 11px;border-radius:6px;font-size:11px;font-weight:600;color:var(--sub)}
+.seg button.on{background:rgba(255,255,255,.18);color:var(--ink)}
+#chat{flex:1.5 1 0;border-top:1px solid var(--line);padding-top:8px;display:flex;flex-direction:column;gap:6px}
+.msg{max-width:92%;padding:7px 11px;border-radius:12px;font-size:13px;line-height:1.5;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:rgba(110,231,192,.18)}
+.msg.ai{align-self:flex-start;background:var(--soft)}
+.rl{counter-reset:r;align-self:stretch}
+#chatBtn.active{color:var(--accent);background:var(--soft)}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -83,6 +93,7 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
     <span class="dot"></span><b class="title">Copilot</b>
     <button id="go" class="pill">통역하기</button>
     <button id="toggle" class="pill">듣기 시작</button>
+    <button id="chatBtn" class="icon" title="Claude와 대화">💬</button>
     <button id="gear" class="icon" title="설정">⚙</button>
     <button id="fold" class="icon" title="접기">▾</button>
     <button id="quit" class="icon" title="종료">✕</button>
@@ -98,7 +109,7 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
         <option value="fr-FR" data-name="French">Français</option></select></label>
       <label>입력 <select id="src">
         <option value="tab">Teams 탭 소리</option>
-        <option value="sys">Teams 앱 (BlackHole)</option>
+        <option value="sys">컴퓨터 소리 (BlackHole)</option>
         <option value="mic">마이크</option></select></label>
       <label>방식 <select id="mode">
         <option value="turn">끝까지 듣고 통역</option>
@@ -115,9 +126,12 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
   </section>
   <div class="body">
     <div class="scroll" id="log"></div>
+    <div class="scroll" id="chat" hidden></div>
     <div class="scroll" id="replies"><div class="empty">통역하면 답변 제안이 여기에 나타나요</div></div>
   </div>
   <footer class="dock">
+    <div class="lenrow"><span>답변 길이</span>
+      <div class="seg" id="len"><button data-len="short">짧게</button><button data-len="medium">보통</button><button data-len="long">길게</button></div></div>
     <div class="chips" id="chips">
       <button data-p="이 사람의 질문에 답하고 싶어">질문에 답하기</button>
       <button data-p="이 사람의 말에 대해 질문하고 싶어">질문하기</button>
@@ -136,11 +150,12 @@ const S = {rec:null, on:false, history:[], seq:0};
 const cfg = () => {
   const o = $('#mlang').selectedOptions[0];
   return {meeting_lang:o.dataset.name, my_lang:'Korean', context:$('#ctx').value,
-          history:S.history.slice(-8), want_replies:$('#wantReplies').checked};
+          history:S.history.slice(-8), want_replies:$('#wantReplies').checked, length:S.len};
 };
 const status = t => $('#status').textContent = t || '';
 
 async function call(body){
+  S.lastBody = body;
   const r = await fetch('/api/process',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!r.ok) throw new Error((await r.json()).detail || r.status);
   return r.json();
@@ -153,8 +168,8 @@ function addTurn(speaker, orig, tr){
   d.append(a,b); $('#log').append(d); $('#log').scrollTop = 1e9; return b;
 }
 
-function renderReplies(list){
-  const box = $('#replies'); box.replaceChildren();
+function renderReplies(list, box=$('#replies')){
+  S.lastReplies = list||[]; box.replaceChildren();
   (list||[]).forEach(r=>{
     const d = document.createElement('div'); d.className='reply';
     const l = document.createElement('b'); l.textContent = r.label;
@@ -302,7 +317,7 @@ async function startSys(){
   node.connect(mute).connect(ctx.destination);
   V.ctx = ctx; V.stream = stream; S.on = true; S.tab = true;
   $('#toggle').textContent='중지'; $('#toggle').classList.add('live');
-  status('Teams 앱 소리를 듣는 중… (BlackHole)');
+  status('컴퓨터 소리를 듣는 중… (BlackHole)');
 }
 
 function start(){ const v=$('#src').value; return v==='tab' ? startTab() : v==='sys' ? startSys() : startMic(); }
@@ -379,6 +394,58 @@ $('#paste').onkeydown = e=>{ if(e.key==='Enter'){ onTheirSpeech(e.target.value.t
 $('#idea').onkeydown = e=>{ if(e.key==='Enter'){ onMyIdea(e.target.value.trim()); e.target.value=''; } };
 $('#send').onclick = ()=>{ const i=$('#idea'); onMyIdea(i.value.trim()); i.value=''; };
 document.querySelectorAll('#chips button').forEach(b=> b.onclick = ()=> onMyIdea(b.dataset.p));
+/* ---- 답변 길이 ---- */
+S.len='medium'; try{ S.len=localStorage.getItem('len')||'medium'; }catch{}
+function syncLen(){ document.querySelectorAll('#len button').forEach(b=>b.classList.toggle('on', b.dataset.len===S.len)); }
+syncLen();
+document.querySelectorAll('#len button').forEach(b=> b.onclick = async ()=>{
+  S.len=b.dataset.len; try{ localStorage.setItem('len',S.len); }catch{} syncLen();
+  if(S.lastBody && !S.chatOn){                      // 지금 보이는 답변을 새 길이로 다시 만들기
+    status('새 길이로 답변을 다시 만드는 중…');
+    try{ const res=await call({...S.lastBody, length:S.len, want_replies:true}); renderReplies(res.replies); status(''); }
+    catch(e){ status(e.message); }
+  }
+});
+
+/* ---- Claude와 대화 ---- */
+S.chat=[]; S.chatOn=false; S.lastReplies=S.lastReplies||[];
+function chatMsg(role,text){
+  const d=document.createElement('div'); d.className='msg '+role; d.textContent=text;
+  $('#chat').append(d); $('#chat').scrollTop=1e9; return d;
+}
+function setChat(on){
+  S.chatOn=on;
+  $('#chat').hidden=!on; $('#replies').hidden=on; $('#chips').hidden=on;
+  $('#chatBtn').classList.toggle('active',on);
+  $('#idea').placeholder = on ? 'Claude에게 요청 예) 2번 답변을 더 짧고 자신감 있게' : '원하는 답변 방향을 한국어로 입력';
+  if(on && !$('#chat').children.length) chatMsg('ai','답변을 같이 다듬어 볼까요?\n예) "2번 더 짧게", "더 겸손한 톤으로", "이 말은 무슨 뜻이야?"');
+}
+$('#chatBtn').onclick=()=>setChat(!S.chatOn);
+async function sendChat(text){
+  chatMsg('user',text); S.chat.push({role:'user',content:text});
+  const wait=chatMsg('ai','…');
+  try{
+    const o=$('#mlang').selectedOptions[0];
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      messages:S.chat.slice(-12), context:$('#ctx').value, meeting_lang:o.dataset.name, length:S.len,
+      history:S.history.slice(-12), replies:S.lastReplies})});
+    const j=await r.json(); if(!r.ok) throw new Error(j.detail||r.status);
+    wait.textContent=j.message||'(완료)'; S.chat.push({role:'assistant',content:j.message||''});
+    if(j.replies && j.replies.length){
+      renderReplies(j.replies);                       // 답변 목록도 함께 갱신
+      const box=document.createElement('div'); box.className='rl'; $('#chat').append(box);
+      renderReplies(j.replies, box);                  // 대화창 안에서도 바로 보기
+    }
+    $('#chat').scrollTop=1e9;
+  }catch(e){ wait.textContent='오류: '+e.message; }
+}
+function submitIdea(){
+  const i=$('#idea'); const t=i.value.trim(); i.value=''; if(!t) return;
+  S.chatOn ? sendChat(t) : onMyIdea(t);
+}
+$('#idea').onkeydown = e=>{ if(e.key==='Enter' && !e.isComposing){ e.preventDefault(); submitIdea(); } };
+$('#send').onclick = submitIdea;
+
 </script>
 </body>
 </html>
