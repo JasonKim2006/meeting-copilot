@@ -36,7 +36,7 @@ Speech is transcribed locally. Only the transcribed text (and your resume text, 
 ## Setup
 
 ```bash
-git clone https://github.com/<your-username>/meeting-copilot.git
+git clone https://github.com/JasonKim2006/meeting-copilot.git
 cd meeting-copilot
 
 # Python
