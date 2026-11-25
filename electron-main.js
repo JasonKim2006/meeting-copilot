@@ -23,6 +23,7 @@ function waitForServer(cb, tries = 0) {
 async function createWindow() {
   if (process.platform === 'darwin') await systemPreferences.askForMediaAccess('microphone');
   const ses = session.defaultSession;
+  await ses.clearCache();   // 옛 화면 캐시 제거
   ses.setPermissionRequestHandler((wc, permission, cb) => cb(permission === 'media'));
   ses.setPermissionCheckHandler((wc, permission) => permission === 'media');
 

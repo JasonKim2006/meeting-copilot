@@ -7,13 +7,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from anthropic import AsyncAnthropic
 
-MODEL = os.getenv("MODEL", "claude-haiku-5-5")  # 빠른 응답용. 품질을 높이려면 claude-sonnet-5-5
+MODEL = os.getenv("MODEL", "claude-sonnet-5-5")  # 더 저렴하게: claude-haiku-5-5
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 print("KEY LOADED:", bool(os.getenv("ANTHROPIC_API_KEY")), flush=True)
 client = AsyncAnthropic()
 app = FastAPI()
+
+
+@app.middleware("http")
+async def no_cache(request, call_next):
+    resp = await call_next(request)
+    resp.headers["Cache-Control"] = "no-store"   # 앱 창이 옛 화면을 캐시로 보여주지 않게
+    return resp
+
 
 
 class Turn(BaseModel):
@@ -33,21 +41,25 @@ class Req(BaseModel):
 
 
 SYSTEM = """You are a real-time meeting interpreter and reply assistant.
-You receive JSON with: my_lang, meeting_lang, context, history, text (what the other person just said), idea (optional: what I want to say, in my_lang).
+You receive JSON with: my_lang, meeting_lang, context, history, text (what the other person just said), instruction (optional: my directions to YOU about the reply I want, written in my_lang).
 
 Return ONLY a JSON object, no markdown fences:
 {
   "translation": "<text translated into my_lang; empty string if text is empty>",
   "replies": [
-    {"label": "<2-4 word intent label in my_lang>", "text": "<reply written in meeting_lang, natural spoken style, 2-4 sentences>", "gloss": "<same reply translated to my_lang so I know what I'm saying>"}
+    {"label": "<2-4 word intent label in my_lang>", "text": "<reply written in meeting_lang, natural spoken style, following the length rules below>", "gloss": "<same reply translated to my_lang so I know what I'm saying>"}
   ]
 }
 
 Rules:
 - Translate faithfully and naturally; keep names, numbers and technical terms accurate.
 - If want_replies is false, return "replies": [].
-- If idea is empty: give exactly 5 replies. Every reply must be a substantive statement or direct answer to what the other person said, NOT a question. If they asked a question, each reply answers it from a different stance. Use these 5 stances, one each: (1) agree and support, (2) agree and add a concrete point or example, (3) share a cautious or nuanced view, (4) politely disagree or raise a concern, (5) commit to a concrete next step (use placeholders like [date] if details are missing).
-- If idea is non-empty, it is my instruction in my_lang about the reply I want. It is either what I want to say, or a directive about the kind of reply (e.g. answer their question, ask a question about what they said, agree and add my opinion, push back politely, buy time). Follow it exactly. Base the reply on the most recent 'them' turn in history (text may be empty). Give exactly 3 versions in meeting_lang that differ in tone or length (casual, neutral, formal). Obey any length or tone request inside the instruction. If the instruction asks me to ask a question, the replies must be questions. Do not add commitments or facts I did not provide; use placeholders like [date] where needed.
+- If instruction is empty: give exactly 5 replies. Every reply must be a substantive statement or direct answer to what the other person said, NOT a question. If they asked a question, each reply answers it from a different stance. Use these 5 stances, one each: (1) agree and support, (2) agree and add a concrete point or example, (3) share a cautious or nuanced view, (4) politely disagree or raise a concern, (5) commit to a concrete next step (use placeholders like [date] if details are missing).
+- If instruction is non-empty: it is a command addressed to YOU, never text to translate. NEVER translate or quote the instruction itself, and never write a reply that talks about the instruction (e.g. do not output "please answer in six lines"). Parts of it that describe format (length, number of lines or sentences or words, tone, style, language level) are constraints on how you write the reply. Parts that describe content (what to say, what to ask, which stance to take, facts I give) are what the reply must say. Write the reply I would actually say out loud, in meeting_lang, responding to the most recent 'them' turn (see history, or text if present).
+  - Give exactly 3 versions. They must all satisfy the instruction; they differ only in tone (casual, neutral, formal) and wording.
+  - If the instruction asks me to ask a question, every version must be a question.
+  - If the instruction states a length (e.g. "6줄" = 6 lines, "3문장" = 3 sentences, "100 words"), obey it exactly for every version, in both text and gloss. This explicit length OVERRIDES the default length. One "line" is one sentence; put each line on its own line, separated by "\n" inside the JSON string.
+  - Add no facts, commitments, numbers, or dates beyond what I gave or what is in context or resume; use placeholders like [date].
 - Never invent facts, dates, or promises that are not in the context or history. If a reply needs info you lack, use a safe placeholder like [date].
 """
 
@@ -63,6 +75,7 @@ def parse_json(raw: str) -> dict:
 async def process(req: Req):
     payload = req.model_dump()
     payload["history"] = payload["history"][-8:]
+    payload["instruction"] = payload.pop("idea", "")
     try:
         msg = await client.messages.create(
             model=MODEL,
@@ -98,14 +111,15 @@ def load_resume():
 
 
 LENGTHS = {
-    "short": "Keep every reply to ONE short sentence (under about 20 words). The gloss is equally short.",
-    "medium": "Keep every reply to 2-3 sentences.",
-    "long": "Make every reply detailed: 4-6 sentences (about 80-120 words) with a reason or a concrete example. The gloss mirrors it.",
+    "short": "ONE short sentence, at most 15 words.",
+    "medium": "Exactly 3 sentences.",
+    "long": "6 to 8 sentences (roughly 120-160 words) with the reasoning and a concrete example.",
 }
 
 
 def length_rule(length):
-    return "\nREPLY LENGTH RULE (overrides any sentence count stated above): " + LENGTHS.get(length, LENGTHS["medium"]) + "\n"
+    return ("\nDEFAULT REPLY LENGTH (the gloss uses the same length): " + LENGTHS.get(length, LENGTHS["medium"])
+            + " This default applies ONLY when my instruction or message does not state its own length, line count, sentence count, or word count. An explicit one always wins.\n")
 
 
 def system_prompt(length="medium"):

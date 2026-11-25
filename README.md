@@ -83,7 +83,7 @@ Browser-only mode: `uvicorn main:app --reload`, then open `http://localhost:8000
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MODEL` | `claude-haiku-5-5` | Claude model used for translation and replies |
+| `MODEL` | `claude-sonnet-5-5` | Claude model used for translation and replies |
 | `MLX_MODEL` | `mlx-community/whisper-large-v3-turbo` | Speech model (use `mlx-community/whisper-small-mlx` for a smaller one) |
 | `WHISPER_MODEL` | `small` | Fallback model if `mlx-whisper` is not installed |
 

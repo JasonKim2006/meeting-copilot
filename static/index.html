@@ -74,6 +74,7 @@ textarea{width:100%;resize:none;field-sizing:content;min-height:32px;max-height:
 #send{width:32px;height:32px;border-radius:10px;background:var(--ink);color:#111;font-size:12px}
 input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
 ::placeholder{color:var(--faint)}
+.reply .en,.reply .gl{white-space:pre-wrap}
 .lenrow{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--faint)}
 .seg{display:flex;background:var(--soft);border-radius:8px;padding:2px}
 .seg button{height:20px;padding:0 11px;border-radius:6px;font-size:11px;font-weight:600;color:var(--sub)}
@@ -84,6 +85,8 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
 .msg.ai{align-self:flex-start;background:var(--soft)}
 .rl{counter-reset:r;align-self:stretch}
 #chatBtn.active{color:var(--accent);background:var(--soft)}
+.lvl{width:30px;height:4px;border-radius:2px;background:var(--soft);overflow:hidden;flex:none}
+.lvl i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -91,6 +94,7 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
 <div class="shell">
   <header class="top">
     <span class="dot"></span><b class="title">Copilot</b>
+    <span class="lvl" title="입력 소리 크기"><i id="lvlbar"></i></span>
     <button id="go" class="pill">통역하기</button>
     <button id="toggle" class="pill">듣기 시작</button>
     <button id="chatBtn" class="icon" title="Claude와 대화">💬</button>
@@ -108,8 +112,8 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
         <option value="es-ES" data-name="Spanish">Español</option>
         <option value="fr-FR" data-name="French">Français</option></select></label>
       <label>입력 <select id="src">
-        <option value="tab">Teams 탭 소리</option>
-        <option value="sys">컴퓨터 소리 (BlackHole)</option>
+        <option value="tab">탭 소리</option>
+        <option value="sys">맥 소리 (BlackHole)</option>
         <option value="mic">마이크</option></select></label>
       <label>방식 <select id="mode">
         <option value="turn">끝까지 듣고 통역</option>
@@ -140,7 +144,7 @@ input:focus,textarea:focus{outline:0;border-color:rgba(110,231,192,.6)}
       <button data-p="더 자세한 설명을 부탁하고 싶어">설명 요청</button>
       <button data-p="생각할 시간이 필요하다고 말하고 싶어">시간 벌기</button>
     </div>
-    <div class="row"><input id="idea" placeholder="원하는 답변 방향을 한국어로 입력"><button id="send">▶</button></div>
+    <div class="row"><input id="idea" placeholder="원하는 답변 방향 예) 일정은 월요일이라고 6줄로 답해줘"><button id="send">▶</button></div>
   </footer>
 </div>
 <script>
@@ -225,14 +229,15 @@ function startMic(){
 }
 function stopMic(){ S.on=false; S.rec && S.rec.stop(); $('#toggle').textContent='듣기 시작'; $('#toggle').classList.remove('live'); status(''); }
 
-/* ---- Teams 탭 오디오 캡처 ---- */
+/* ---- 탭 오디오 캡처 ---- */
 const WORKLET = `class P extends AudioWorkletProcessor{process(i){const c=i[0][0];if(c)this.port.postMessage(c.slice());return true}}registerProcessor('pcm',P)`;
 const V = {pre:[], buf:[], n:0, speech:false, sil:0, ctx:null, stream:null};
 const THRESH = 0.01;   // 소리 감지 민감도. 인식이 안 되면 0.005로 낮춰보세요.
 
 function feed(c){
   let s=0; for(let i=0;i<c.length;i++) s+=c[i]*c[i];
-  const loud = Math.sqrt(s/c.length) > THRESH;
+  const rms = Math.sqrt(s/c.length); V.rms = rms; if(rms > 0.002) V.lastSound = Date.now();
+  const loud = rms > THRESH;
   if(loud && !V.speech){ V.speech=true; V.buf=[...V.pre]; V.n=V.buf.reduce((a,b)=>a+b.length,0); V.sil=0; }
   if(V.speech){
     V.buf.push(c); V.n+=c.length;
@@ -293,9 +298,9 @@ async function startTab(){
   ctx.createMediaStreamSource(new MediaStream(at)).connect(node);
   node.connect(mute).connect(ctx.destination);
   at[0].onended = () => stop();
-  V.ctx = ctx; V.stream = stream; S.on = true; S.tab = true;
+  V.ctx = ctx; V.stream = stream; S.on = true; S.tab = true; V.lastSound = Date.now(); V.src = $('#src').value; S.hint = false;
   $('#toggle').textContent='중지'; $('#toggle').classList.add('live');
-  status('Teams 탭 소리를 듣는 중… (처음 한 번은 모델 다운로드로 1~2분 걸릴 수 있어요)');
+  status('탭 소리를 듣는 중… (처음 한 번은 모델 다운로드로 1~2분 걸릴 수 있어요)');
 }
 
 async function startSys(){
@@ -303,8 +308,9 @@ async function startSys(){
   try{
     const tmp = await navigator.mediaDevices.getUserMedia({audio:true});   // 장치 이름을 읽기 위한 권한 요청
     tmp.getTracks().forEach(t=>t.stop());
-    const dev = (await navigator.mediaDevices.enumerateDevices()).find(d=>d.kind==='audioinput' && /blackhole/i.test(d.label));
-    if(!dev){ status('BlackHole 장치를 못 찾았어요. 설치와 설정을 확인하세요.'); return; }
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audioinput');
+    const dev = devs.find(d=>/blackhole/i.test(d.label));
+    if(!dev){ status('BlackHole 장치를 못 찾았어요. 설치 후 맥을 재시동했는지 확인하세요. 보이는 입력: '+(devs.map(d=>d.label).join(', ')||'없음')); return; }
     stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:dev.deviceId},
       echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
   }catch(e){ status('오디오 장치 오류: '+e.message); return; }
@@ -315,9 +321,9 @@ async function startSys(){
   const mute = ctx.createGain(); mute.gain.value = 0;
   ctx.createMediaStreamSource(stream).connect(node);
   node.connect(mute).connect(ctx.destination);
-  V.ctx = ctx; V.stream = stream; S.on = true; S.tab = true;
+  V.ctx = ctx; V.stream = stream; S.on = true; S.tab = true; V.lastSound = Date.now(); V.src = $('#src').value; S.hint = false;
   $('#toggle').textContent='중지'; $('#toggle').classList.add('live');
-  status('컴퓨터 소리를 듣는 중… (BlackHole)');
+  status('맥 소리를 듣는 중…');
 }
 
 function start(){ const v=$('#src').value; return v==='tab' ? startTab() : v==='sys' ? startSys() : startMic(); }
@@ -389,6 +395,19 @@ try{ const v=localStorage.getItem('op'); if(v) $('#op').value=v; }catch{}
 setOp($('#op').value);
 $('#op').oninput=e=>{ setOp(e.target.value); try{ localStorage.setItem('op',e.target.value); }catch{} };
 
+/* ---- 입력 소리 크기 표시 + 소리가 안 들어올 때 안내 ---- */
+setInterval(()=>{
+  const bar=$('#lvlbar');
+  if(!S.on || !S.tab){ bar.style.width='0%'; S.hint=false; return; }
+  bar.style.width=Math.min(100,Math.round((V.rms||0)*600))+'%';
+  const quiet = Date.now()-(V.lastSound||0) > 4000;
+  if(quiet && !S.hint){
+    S.hint=true;
+    status(V.src==='sys' ? '맥 소리가 안 들어와요. 시스템 설정 → 소리 → 출력이 "다중 출력 장치"인지, 영상이 재생 중인지 확인하세요.'
+                         : '탭 소리가 안 들어와요. 공유할 때 "탭 오디오도 공유"를 체크했는지 확인하세요.');
+  } else if(!quiet && S.hint){ S.hint=false; status('듣는 중…'); }
+},250);
+
 $('#toggle').onclick = ()=> S.on ? stop() : start();
 $('#paste').onkeydown = e=>{ if(e.key==='Enter'){ onTheirSpeech(e.target.value.trim()); e.target.value=''; } };
 $('#idea').onkeydown = e=>{ if(e.key==='Enter'){ onMyIdea(e.target.value.trim()); e.target.value=''; } };
@@ -417,7 +436,7 @@ function setChat(on){
   S.chatOn=on;
   $('#chat').hidden=!on; $('#replies').hidden=on; $('#chips').hidden=on;
   $('#chatBtn').classList.toggle('active',on);
-  $('#idea').placeholder = on ? 'Claude에게 요청 예) 2번 답변을 더 짧고 자신감 있게' : '원하는 답변 방향을 한국어로 입력';
+  $('#idea').placeholder = on ? 'Claude에게 요청 예) 2번 답변을 더 짧고 자신감 있게' : '원하는 답변 방향 예) 일정은 월요일이라고 6줄로 답해줘';
   if(on && !$('#chat').children.length) chatMsg('ai','답변을 같이 다듬어 볼까요?\n예) "2번 더 짧게", "더 겸손한 톤으로", "이 말은 무슨 뜻이야?"');
 }
 $('#chatBtn').onclick=()=>setChat(!S.chatOn);
